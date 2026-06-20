@@ -53,9 +53,91 @@ app.get('/api/users/:id', async (req, res) => {
 
 // ==================== BOOKS API ====================
 
+// ==================== BOOKS API ====================
+
 app.get('/api/books', async (req, res) => {
-  const result = await booksCollection.find().toArray();
-  res.send(result);
+  try {
+    const matchQuery = {};
+
+    // গ্লোবাল সার্চ লজিক
+    if (req.query.search) {
+      matchQuery.$or = [
+        { title: { $regex: req.query.search, $options: "i" } },
+        { category: { $regex: req.query.search, $options: "i" } },
+        { status: { $regex: req.query.search, $options: "i" } }
+      ];
+    }
+
+    // নির্দিষ্ট ফিল্ড ফিল্টারিং লজিক
+    if (req.query.title) {
+      matchQuery.title = { $regex: req.query.title, $options: "i" };
+    }
+    if (req.query.category) {
+      matchQuery.category = { $regex: req.query.category, $options: "i" };
+    }
+    if (req.query.status) {
+      matchQuery.status = { $regex: req.query.status, $options: "i" };
+    }
+
+    const books = await booksCollection.aggregate([
+      // ১. প্রথমে ডাটা ফিল্টার করা
+      { $match: matchQuery },
+
+      // ২. সরাসরি পাইপলাইনের ভেতরে স্ট্রিং userId কে ObjectId বানিয়ে ম্যাচ করা
+      {
+        $lookup: {
+          from: "user", // ✅ "users" থেকে পরিবর্তন করে আপনার আসল কালেকশনের নাম "user" দেওয়া হলো
+          let: { bookUserId: "$userId" }, 
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $eq: [
+                    "$_id",
+                    { $toObjectId: "$$bookUserId" } 
+                  ]
+                }
+              }
+            }
+          ],
+          as: "publisher"
+        }
+      },
+
+      // ৩. Array কে Object এ রূপান্তর করা
+      {
+        $unwind: {
+          path: "$publisher",
+          preserveNullAndEmptyArrays: true 
+        }
+      },
+
+      // ৪. ফ্রন্টএন্ডে যে ডাটাগুলো পাঠাতে চান তা প্রজেক্ট করা
+      {
+        $project: {
+          title: 1,
+          author: 1,
+          description: 1,
+          price: 1,
+          category: 1,
+          image: 1,
+          status: 1,
+          date: 1,
+          userId: 1,
+          publisher: {
+            name: 1,
+            email: 1,
+            image: 1
+          }
+        }
+      }
+    ]).toArray();
+
+    res.send(books);
+  } catch (error) {
+    console.error("Books fetch error:", error);
+    res.status(500).send({ message: "Failed to fetch books" });
+  }
 });
 
 app.post('/api/books', async (req, res) => {
@@ -79,6 +161,68 @@ app.get('/api/books/:id', async (req, res) => {
   res.send(result);
 });
 
+// ==================== APPROVE BOOK API ====================
+app.patch('/api/books/approve/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const filter = { _id: new ObjectId(id) };
+
+    // স্ট্যাটাস পরিবর্তন করে "Approved" করা হচ্ছে
+    const updateDoc = {
+      $set: {
+        status: "Approved" // আপনি চাইলে আপনার ফ্রন্টএন্ডের সাথে মিলিয়ে "Published" ও দিতে পারেন
+      }
+    };
+
+    const result = await booksCollection.updateOne(filter, updateDoc);
+
+    if (result.matchedCount === 0) {
+      return res.status(404).send({
+        success: false,
+        message: "এই আইডি দিয়ে কোনো বই পাওয়া হয়নি।"
+      });
+    }
+
+    res.send({
+      success: true,
+      message: "বইটি সফলভাবে অ্যাপ্রুভ এবং পাবলিশ করা হয়েছে।",
+      result
+    });
+
+  } catch (error) {
+    console.error("Approve Book Error:", error.message);
+    res.status(500).send({ success: false, error: error.message });
+  }
+});
+
+// ==================== DELETE BOOK API ====================
+app.delete('/api/books/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const filter = { _id: new ObjectId(id) };
+
+    // ডাটাবেজ থেকে নির্দিষ্ট আইডি ওয়ালা বইটি ডিলিট করা হচ্ছে
+    const result = await booksCollection.deleteOne(filter);
+
+    if (result.deletedCount === 0) {
+      return res.status(404).send({
+        success: false,
+        message: "এই আইডি দিয়ে কোনো বই পাওয়া যায়নি।"
+      });
+    }
+
+    res.send({
+      success: true,
+      message: "বইয়ের রিকোয়েস্টটি সফলভাবে ডাটাবেজ থেকে ডিলিট করা হয়েছে।",
+      result
+    });
+
+  } catch (error) {
+    console.error("Delete Book Error:", error.message);
+    res.status(500).send({ success: false, error: error.message });
+  }
+});
+
 
 // ==================== UPDATE BOOK STATUS API ====================
 // নির্দিষ্ট বইয়ের স্ট্যাটাস আপডেট করার রুট (যেমন: published -> unpublished / archived)
@@ -93,32 +237,32 @@ app.patch('/api/books/:id', async (req, res) => {
 
     // ২. চেক করা হচ্ছে বডিতে আসলেই কোনো ডাটা পাঠানো হয়েছে কিনা
     if (Object.keys(updateData).length === 0) {
-      return res.status(400).send({ 
-        success: false, 
-        message: "আপডেট করার জন্য কোনো তথ্য প্রদান করা হয়নি।" 
+      return res.status(400).send({
+        success: false,
+        message: "আপডেট করার জন্য কোনো তথ্য প্রদান করা হয়নি।"
       });
     }
 
     const filter = { _id: new ObjectId(id) };
-    
+
     // ৩. ডাইনামিক আপডেট ডকুমেন্ট (বডিতে যা আসবে, শুধু সেটুকুই ডাটাবেজে আপডেট হবে)
     const updateDoc = {
-      $set: updateData 
+      $set: updateData
     };
 
     const result = await booksCollection.updateOne(filter, updateDoc);
 
     if (result.matchedCount === 0) {
-      return res.status(404).send({ 
-        success: false, 
-        message: "এই আইডি দিয়ে কোনো বই পাওয়া যায়নি।" 
+      return res.status(404).send({
+        success: false,
+        message: "এই আইডি দিয়ে কোনো বই পাওয়া যায়নি।"
       });
     }
 
-    res.send({ 
-      success: true, 
+    res.send({
+      success: true,
       message: "বইয়ের তথ্য সফলভাবে ডাটাবেজে আপডেট করা হয়েছে।",
-      result 
+      result
     });
 
   } catch (error) {
@@ -156,14 +300,14 @@ app.get('/api/orders/user/:authorId', async (req, res) => {
     // ২. মেইন পাইপলাইন
     const pipeline = [
       // স্টেপ ১: নির্দিষ্ট লাইব্রেরিয়ান/অথরের অর্ডার ফিল্টার
-      { 
-        $match: { authorId: authorId } 
+      {
+        $match: { authorId: authorId }
       },
 
       // স্টেপ ২: authorId দিয়ে user কালেকশন থেকে লাইব্রেরিয়ানের ডিটেইলস আনা
       {
         $lookup: {
-          from: "user", 
+          from: "user",
           let: { orderAuthorId: "$authorId" },
           pipeline: [
             {
@@ -180,7 +324,7 @@ app.get('/api/orders/user/:authorId', async (req, res) => {
       // স্টেপ ৩: userId দিয়ে user কালেকশন থেকে কাস্টমারের ডিটেইলস আনা
       {
         $lookup: {
-          from: "user", 
+          from: "user",
           let: { orderUserId: "$userId" },
           pipeline: [
             {
@@ -212,14 +356,14 @@ app.get('/api/orders/user/:authorId', async (req, res) => {
       { $unwind: { path: "$bookDetails", preserveNullAndEmptyArrays: true } },
 
       // স্টেপ ৫: সরাসরি 'date' ফিল্ড ধরে নিখুঁতভাবে সর্ট করা (যেহেতু এটি প্রোপার ডেট ফরম্যাট)
-      { 
-        $sort: { date: -1 } 
+      {
+        $sort: { date: -1 }
       }
     ];
 
     const result = await orderCollection.aggregate(pipeline).toArray();
     console.log("Aggregated orders successfully combined:", result.length);
-    
+
     res.send(result);
 
   } catch (error) {
@@ -262,10 +406,10 @@ app.patch('/api/orders/:id', async (req, res) => {
       return res.status(404).send({ success: false, message: "এই আইডি দিয়ে কোনো অর্ডার পাওয়া যায়নি।" });
     }
 
-    res.send({ 
-      success: true, 
+    res.send({
+      success: true,
       message: `অর্ডারের স্ট্যাটাস সফলভাবে '${status}' এ আপডেট করা হয়েছে।`,
-      result 
+      result
     });
 
   } catch (error) {
@@ -338,7 +482,7 @@ app.get('/api/librarian/stats/:authorId', async (req, res) => {
       if (order.date) {
         const orderDate = new Date(order.date);
         // ডেট থেকে ৩ অক্ষরের মাসের নাম বের করা (যেমন: 'Jun', 'Jul')
-        const monthName = orderDate.toLocaleString('en-US', { month: 'short' }); 
+        const monthName = orderDate.toLocaleString('en-US', { month: 'short' });
 
         if (monthlyDataMap[monthName]) {
           // রিকোয়েস্ট সংখ্যা ১ বাড়ানো
@@ -398,10 +542,10 @@ app.get('/api/librarian/stats/:authorId', async (req, res) => {
     // চূড়ান্ত রেসপন্স পাঠানো
     res.send({
       success: true,
-      stats: { 
-        totalBooks, 
-        totalEarnings, 
-        pendingRequests 
+      stats: {
+        totalBooks,
+        totalEarnings,
+        pendingRequests
       },
       earningTrends: activeMonthsTrends, // ফিল্টার করা ডাটা
       topRequestedBooks
