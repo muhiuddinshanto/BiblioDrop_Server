@@ -864,8 +864,8 @@ app.get('/api/reviews/user/:userId', verifyToken, async (req, res) => {
         reviewsWithTitle.push({
           _id: review._id,
           bookId: review.bookId,
-          bookTitle: "বই পাওয়া যায়নি",
-          bookImage: null,
+          bookTitle: book ? book.title : "বই পাওয়া যায়নি",
+          bookImage: book ? book.image : null,
           userId: review.userId,
           userName: review.userName,
           rating: review.rating,
