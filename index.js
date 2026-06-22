@@ -369,6 +369,7 @@ app.get('/api/books', async (req, res) => {
       matchQuery.status = "Published";
     }
 
+    // 🔍 সার্চ ফিল্টার
     if (req.query.search) {
       matchQuery.$or = [
         { title: { $regex: req.query.search, $options: "i" } },
@@ -376,11 +377,13 @@ app.get('/api/books', async (req, res) => {
       ];
     }
 
+    // 📂 ক্যাটাগরি ফিল্টার
     if (req.query.category) {
       const categories = req.query.category.split(',');
       matchQuery.category = { $in: categories };
     }
 
+    // 💰 প্রাইস ফিল্টার
     if (req.query.maxPrice) {
       matchQuery.price = { $lte: parseFloat(req.query.maxPrice) };
     }
@@ -395,10 +398,10 @@ app.get('/api/books', async (req, res) => {
       }
     }
 
-    // 🚀 এগ্রিগেশন পাইপলাইন এক্সিকিউশন
-    const books = await booksCollection.aggregate([
+    // 🛠️ কমন এগ্রিগেশন পাইপলাইন স্টেজ (যা পেজিনেশন থাক বা না থাক, দুই ক্ষেত্রেই লাগবে)
+    const basePipeline = [
       { $match: matchQuery },
-      sortStage, // সর্টিং স্টেজ যোগ করা হলো
+      sortStage,
       {
         $lookup: {
           from: "user",
@@ -416,9 +419,41 @@ app.get('/api/books', async (req, res) => {
           publisher: { name: 1, email: 1, image: 1 }
         }
       }
-    ]).toArray();
+    ];
 
+    // ========================================================
+    // 🔢 আলাদা পেজিনেশন এপিআই ব্লক (যদি URL-এ page প্যারামিটার থাকে)
+    // ========================================================
+    if (req.query.page) {
+      // String থেকে খাঁটি Number-এ রূপান্তর (ক্র্যাশ ফিক্স)
+      const page = parseInt(req.query.page) || 1;
+      const perPage = parseInt(req.query.perPage) || 9;
+      const skip = (page - 1) * perPage;
+
+      // মোট কতটি বই আছে তা ফিল্টার অনুযায়ী গণনা
+      const total = await booksCollection.countDocuments(matchQuery);
+
+      // পেজিনেশনের জন্য পাইপলাইনের শেষে $skip এবং $limit পুশ করা হচ্ছে
+      const paginationPipeline = [
+        ...basePipeline,
+        { $skip: skip },
+        { $limit: perPage }
+      ];
+
+      const books = await booksCollection.aggregate(paginationPipeline).toArray();
+      
+      // অবজেক্ট আকারে রেসপন্স পাঠানো হচ্ছে { books: [...], total: 38 }
+      return res.send({ books, total });
+    }
+
+    // ========================================================
+    // 🔄 সাধারণ এপিআই ব্লক (যদি URL-এ page না থাকে - সব বই একসাথে যাবে)
+    // ========================================================
+    const books = await booksCollection.aggregate(basePipeline).toArray();
+    
+    // সরাসরি অ্যারে আকারে রেসপন্স [book1, book2, ...]
     res.send(books);
+
   } catch (error) {
     console.error("Books fetch error:", error);
     res.status(500).send({ message: "Failed to fetch books" });
@@ -727,7 +762,7 @@ app.get('/api/admin/transactions', verifyToken,adminVerify, async (req, res) => 
 });
 
 // ==================== ADMIN DASHBOARD STATS API ====================
-// ==================== ADMIN DASHBOARD STATS API ====================
+
 app.get('/api/admin/stats',verifyToken,adminVerify, async (req, res) => {
   try {
     // ১. Total Users
@@ -805,7 +840,7 @@ app.get('/api/admin/stats',verifyToken,adminVerify, async (req, res) => {
   }
 });
 
-
+// ==================== REVIEW API ====================
 // ✅ Review POST — শুধু ক্রেতারাই পারবে
 app.post('/api/reviews', verifyToken, async (req, res) => {
   try {
@@ -848,6 +883,79 @@ app.post('/api/reviews', verifyToken, async (req, res) => {
     res.json({ success: true, data: review });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.patch('/api/reviews/:reviewId', verifyToken, async (req, res) => {
+  try {
+    const { reviewId } = req.params;
+    const { comment, rating } = req.body;
+    
+    // 🎯 ফিক্সড: মিডলওয়্যার অনুযায়ী req.user._id ব্যবহার করা হয়েছে এবং ওটাকে স্ট্রিং বানানো হয়েছে
+    const userId = req.user?._id?.toString(); 
+
+    if (!userId) {
+      return res.status(401).json({ success: false, message: "Unauthorized. User identity missing." });
+    }
+
+    const existingReview = await reviewsCollection.findOne({ _id: new ObjectId(reviewId) });
+
+    if (!existingReview) {
+      return res.status(404).json({ success: false, message: "Review not found." });
+    }
+
+    // 🎯 ফিক্সড: দুটি আইডিকেই .toString() করে তুলনা করা হচ্ছে যাতে টাইপ কনফ্লিক্ট না হয়
+    if (existingReview.userId.toString() !== userId) {
+      return res.status(403).json({ success: false, message: "Unauthorized. You do not own this review." });
+    }
+
+    const updateDoc = {
+      $set: {
+        comment: comment.trim(),
+        rating: Number(rating),
+        updatedAt: new Date()
+      }
+    };
+
+    await reviewsCollection.updateOne({ _id: new ObjectId(reviewId) }, updateDoc);
+
+    return res.status(200).json({ success: true, message: "Review updated successfully." });
+
+  } catch (error) {
+    console.error("Update error:", error);
+    return res.status(500).json({ success: false, message: "Internal server error." });
+  }
+});
+// 🗑️ DELETE REVIEW ROUTE
+app.delete('/api/reviews/:reviewId', verifyToken, async (req, res) => {
+  try {
+    const { reviewId } = req.params;
+    
+    // 🎯 ফিক্সড: মিডলওয়্যার অনুযায়ী req.user._id ব্যবহার করা হয়েছে
+    const userId = req.user?._id?.toString(); 
+
+    if (!userId) {
+      return res.status(401).json({ success: false, message: "Unauthorized. User identity missing." });
+    }
+
+    const existingReview = await reviewsCollection.findOne({ _id: new ObjectId(reviewId) });
+
+    if (!existingReview) {
+      return res.status(404).json({ success: false, message: "Review not found." });
+    }
+
+    // 🎯 ফিক্সড: স্ট্রিং তুলনা
+    if (existingReview.userId.toString() !== userId) {
+      return res.status(403).json({ success: false, message: "Unauthorized. You do not own this review." });
+    }
+
+    await reviewsCollection.deleteOne({ _id: new ObjectId(reviewId) });
+
+    return res.status(200).json({ success: true, message: "Review deleted successfully." });
+
+  } catch (error) {
+    console.error("Delete error:", error);
+    return res.status(500).json({ success: false, message: "Internal server error." });
   }
 });
 
