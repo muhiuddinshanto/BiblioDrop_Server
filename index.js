@@ -101,8 +101,11 @@ const verifyToken = async (req, res, next) => {
     return res.status(401).send({ message: "Invalid session" });
   }
   const userId = result.userId;
-  const userQuery = {
-    _id: userId
+  let userQuery;
+  try {
+    userQuery = { _id: new ObjectId(userId) };
+  } catch (e) {
+    userQuery = { _id: userId };
   }
   const user = await usersCollection.findOne(userQuery);
   if (!user) {
@@ -633,17 +636,105 @@ app.get('/api/wishlist',verifyToken, async (req, res) => {
   res.send(result);
 });
 
-app.get('/api/wishlist/:userId',verifyToken, async (req, res) => {
-  const { userId } = req.params;
-  const result = await wishlistCollection.find({ userId }).toArray();
-  res.send(result);
+app.get('/api/wishlist/:userId', verifyToken, async (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    const result = await wishlistCollection.aggregate([
+      // ১. প্রথমে এই নির্দিষ্ট ইউজারের উইশলিস্ট ফিল্টার করুন
+      { $match: { userId: userId } }, 
+
+      // ২. স্ট্র্রিং 'bookId' কে মঙ্গোডিবি 'ObjectId' তে কনভার্ট করার ম্যাজিক ট্রিক
+      {
+        $addFields: {
+          bookObjectId: { $toObjectId: "$bookId" } 
+        }
+      },
+
+      // ৩. এবার কনভার্ট করা আইডির সাথে 'books' কালেকশন জয়েন করুন
+      {
+        $lookup: {
+          from: 'books',              // আপনার বইয়ের কালেকশনের নাম
+          localField: 'bookObjectId', // এখন আমরা কনভার্ট করা আইডি দিয়ে খুঁজবো
+          foreignField: '_id',        // বুক কালেকশনের ObjectId
+          as: 'bookDetails'
+        }
+      },
+
+      // ৪. এরে থেকে অবজেক্টে রূপান্তর (যদি কোনো কারণে বুক ডিলিট হয়ে যায়, তাও যেন উইশলিস্ট ক্র্যাশ না করে)
+      { $unwind: { path: '$bookDetails', preserveNullAndEmptyArrays: true } }, 
+
+      // ৫. ফ্রন্টএন্ডে ডাটা প্রজেক্ট বা পাস করা
+      {
+        $project: {
+          _id: 1,
+          userId: 1,
+          bookId: 1,
+          // যদি $lookup সফল হয় তবে মেইন বুক কালেকশনের ডাটা দেখাবে, 
+          // আর তা না হলে উইশলিস্টে অলরেডি সেভ থাকা ব্যাকআপ ডাটা দেখাবে!
+          title: { $ifNull: ['$bookDetails.title', '$title'] },
+          image: { $ifNull: ['$bookDetails.image', '$image'] },
+          author: { $ifNull: ['$bookDetails.author', '$author'] },
+          category: { $ifNull: ['$bookDetails.category', '$category'] },
+          price: { $ifNull: ['$bookDetails.price', '$price'] },
+          date: 1
+        }
+      }
+    ]).toArray();
+
+    res.send(result);
+  } catch (error) {
+    console.error("Aggregation Error:", error);
+    res.status(500).send({ success: false, message: "Failed to fetch wishlist" });
+  }
 });
 
-app.post('/api/wishlist',verifyToken, async (req, res) => {
-  const wishlist = req.body;
-  const newWishlist = { ...wishlist, date: new Date() };
-  const result = await wishlistCollection.insertOne(newWishlist);
-  res.send(result);
+app.delete('/api/wishlist/:id', verifyToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await wishlistCollection.deleteOne({ _id: new ObjectId(id) }); // অথবা শুধু id যদি স্ট্রিং হয়
+    
+    if (result.deletedCount === 1) {
+      res.send({ success: true, message: "Removed from wishlist" });
+    } else {
+      res.status(404).send({ success: false, message: "Item not found" });
+    }
+  } catch (error) {
+    res.status(500).send({ success: false, message: "Server error" });
+  }
+});
+
+
+app.post('/api/wishlist/:id', verifyToken, async (req, res) => {
+  try {
+    const bookId = req.params.id; // ইউআরএল থেকে bookId নেওয়া হচ্ছে
+    const bookData = req.body;    // বডি থেকে বইয়ের সব ডাটা নেওয়া হচ্ছে
+
+    // ফ্রন্টএন্ড থেকে পাঠানো activeUserId অথবা টোকেন মিডলওয়্যার থেকে আইডি নেওয়া হচ্ছে
+    const finalUserId = bookData.activeUserId || req.user?.id || req.user?._id;
+
+    if (!finalUserId) {
+      return res.status(401).send({ success: false, message: "User not authenticated" });
+    }
+
+    // আপনার ঠিক যেমনটি চাই—পারফেক্ট অবজেক্ট ফরম্যাট
+    const wishlistDoc = {
+      bookId: bookId,
+      title: bookData.title,
+      author: bookData.author,
+      category: bookData.category,
+      price: Number(bookData.price || 0),
+      image: bookData.image,
+      userId: finalUserId, // 👈 এখন এটি আর null থাকবে না, ইউজারের আইডি বসে যাবে
+      date: new Date()    // ISODate ফরম্যাটে সেভ হবে
+    };
+
+    const result = await wishlistCollection.insertOne(wishlistDoc);
+    res.status(201).send({ success: true, result });
+  } catch (error) {
+    console.error("Wishlist insertion failed:", error);
+    res.status(500).send({ success: false, message: "Internal server error" });
+  }
 });
 
 // ==================== LIBRARIAN DASHBOARD STATS API ====================
@@ -717,7 +808,7 @@ app.get('/api/admin/transactions', verifyToken,adminVerify, async (req, res) => 
             {
               $match: {
                 $expr: {
-                  $eq: ['$_id', { $toObjectId: '$$buyerId' }] // ✅ string → ObjectId convert
+                  $eq: [{ $toString: '$_id' }, '$$buyerId'] // ✅ safe string comparison
                 }
               }
             }
@@ -733,7 +824,7 @@ app.get('/api/admin/transactions', verifyToken,adminVerify, async (req, res) => 
             {
               $match: {
                 $expr: {
-                  $eq: ['$_id', { $toObjectId: '$$librarianId' }] // ✅ string → ObjectId convert
+                  $eq: [{ $toString: '$_id' }, '$$librarianId'] // ✅ safe string comparison
                 }
               }
             }
@@ -841,23 +932,24 @@ app.get('/api/admin/stats',verifyToken,adminVerify, async (req, res) => {
 });
 
 // ==================== REVIEW API ====================
-// ✅ Review POST — শুধু ক্রেতারাই পারবে
+// Review POST — শুধু ক্রেতারাই পারবে
 app.post('/api/reviews', verifyToken, async (req, res) => {
   try {
     const { bookId, rating, comment } = req.body;
     const userId = req.user._id.toString();
 
-    // 🔒 Backend এও চেক — security এর জন্য জরুরি
+   
     const order = await orderCollection.findOne({
       BookId: bookId,
       userId: userId,
-      PaymentStatus: "completed"
+      PaymentStatus: "completed",
+      status: "Delivered"
     });
 
     if (!order) {
       return res.status(403).json({
         success: false,
-        message: "শুধুমাত্র ক্রেতারাই রিভিউ দিতে পারবেন।"
+        message: "Only buyers can leave reviews."
       });
     }
 
@@ -960,48 +1052,44 @@ app.delete('/api/reviews/:reviewId', verifyToken, async (req, res) => {
 });
 
 
-// ✅ user/:userId আগে রাখতে হবে
+// 
+// ইউজারের দেওয়া সমস্ত রিভিউ গেট করার রাউট
 app.get('/api/reviews/user/:userId', verifyToken, async (req, res) => {
   try {
     const { userId } = req.params;
 
     const reviews = await reviewsCollection
-      .find({ userId })
+      .find({ userId: userId.toString() })
       .sort({ createdAt: -1 })
       .toArray();
 
     const reviewsWithTitle = [];
 
     for (const review of reviews) {
+      let bookDetails = null;
       try {
-        const book = await booksCollection.findOne(
-          { _id: new ObjectId(review.bookId) },
-          { projection: { title: 1, image: 1 } }
-        );
-        reviewsWithTitle.push({
-          _id: review._id,
-          bookId: review.bookId,
-          bookTitle: book ? book.title : "বই পাওয়া যায়নি",
-          bookImage: book ? book.image : null,
-          userId: review.userId,
-          userName: review.userName,
-          rating: review.rating,
-          comment: review.comment,
-          createdAt: review.createdAt
-        });
-      } catch {
-        reviewsWithTitle.push({
-          _id: review._id,
-          bookId: review.bookId,
-          bookTitle: book ? book.title : "বই পাওয়া যায়নি",
-          bookImage: book ? book.image : null,
-          userId: review.userId,
-          userName: review.userName,
-          rating: review.rating,
-          comment: review.comment,
-          createdAt: review.createdAt
-        });
+        // এখানে চেক করা হচ্ছে review.bookId-টি ২৪ ক্যারেক্টারের ভ্যালিড হেক্স স্ট্রিং কি না
+        if (review.bookId && ObjectId.isValid(review.bookId)) {
+          bookDetails = await booksCollection.findOne(
+            { _id: new ObjectId(review.bookId) },
+            { projection: { title: 1, image: 1 } }
+          );
+        }
+      } catch (err) {
+        console.error("Error fetching book for review:", err.message);
       }
+
+      reviewsWithTitle.push({
+        _id: review._id,
+        bookId: review.bookId,
+        bookTitle: bookDetails ? bookDetails.title : "বই পাওয়া যায়নি",
+        bookImage: bookDetails ? bookDetails.image : null,
+        userId: review.userId,
+        userName: review.userName,
+        rating: review.rating,
+        comment: review.comment,
+        createdAt: review.createdAt
+      });
     }
 
     res.json({ success: true, data: reviewsWithTitle });
@@ -1009,25 +1097,33 @@ app.get('/api/reviews/user/:userId', verifyToken, async (req, res) => {
     res.status(500).json({ success: false, error: error.message });
   }
 });
-
-// এটা নিচে থাকবে
-app.get('/api/reviews/:bookId', async (req, res) => {
-  
-});
-// ✅ কোনো বইয়ের সব রিভিউ GET
+// নির্দিষ্ট বইয়ের সব রিভিউ GET
 app.get('/api/reviews/:bookId', async (req, res) => {
   try {
     const { bookId } = req.params;
+
+    if (!bookId) {
+      return res.status(400).json({ success: false, message: "Book ID is required" });
+    }
+
+    // 🎯 মঙ্গোডিবির সাথে আইডি ম্যাচ করানোর সেফ কন্ডিশন
+    const query = {
+      $or: [
+        { bookId: bookId.toString() }, // ১. যদি ডাটাবেজে ভুলবশত স্ট্রিং হিসেবে সেভ হয়ে থাকে
+        { bookId: ObjectId.isValid(bookId) ? new ObjectId(bookId) : bookId } // ২. আসল ObjectId ফরম্যাট চেক (মোস্টলি এটাই কাজ করবে)
+      ]
+    };
+
     const reviews = await reviewsCollection
-      .find({ bookId })
+      .find(query)
       .sort({ createdAt: -1 })
       .toArray();
+
     res.json({ success: true, data: reviews });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
 });
-
 
 
 app.get("/api/top-librarians", async (req, res) => {
