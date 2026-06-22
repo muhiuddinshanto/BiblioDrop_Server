@@ -425,6 +425,17 @@ app.get('/api/books', async (req, res) => {
   }
 });
 
+app.get('/api/books/search', async (req, res) => {
+  try {
+    const searchQuery = req.query.search;
+    const books = await booksCollection.find({ title: { $regex: searchQuery, $options: 'i' } }).toArray();
+    res.send(books);
+  } catch (error) {
+    console.error("Search error:", error);
+    res.status(500).send({ message: "Failed to search books" });
+  }
+})
+
 app.post('/api/books',verifyToken,  async (req, res) => {
   const book = req.body;
   const newBook = { ...book, date: new Date() };
