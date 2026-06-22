@@ -238,6 +238,16 @@ app.get("/api/users",verifyToken,adminVerify, async (req, res) => {
   res.send(result);
 });
 
+app.get("/api/users/librarian", async (req, res) => {
+  const query = {};
+  const role = req.query.role;
+  if (role) {
+    query.role = "librarian";
+  }
+  const result = await usersCollection.find(query).toArray();
+  res.send(result);
+});
+
 app.get('/api/users/:id',verifyToken,adminVerify, async (req, res) => {
   const { id } = req.params;
   const result = await usersCollection.findOne({ _id: new ObjectId(id) });
@@ -896,6 +906,87 @@ app.get('/api/reviews/:bookId', async (req, res) => {
     res.json({ success: true, data: reviews });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+
+
+app.get("/api/top-librarians", async (req, res) => {
+  try {
+    const result = await orderCollection.aggregate([
+      // শুধুমাত্র completed order গুলো নাও
+      {
+        $match: {
+          status: "Delivered"
+        }
+      },
+
+      // authorId অনুযায়ী group করো
+      {
+        $group: {
+          _id: "$authorId",
+          deliveries: { $sum: 1 }
+        }
+      },
+
+      // বেশি delivery যার, সে আগে
+      {
+        $sort: {
+          deliveries: -1
+        }
+      },
+
+      // Top 3
+      {
+        $limit: 3
+      },
+
+      // user collection থেকে librarian info নিয়ে আসো
+      {
+        $lookup: {
+          from: "user",
+          let: { librarianId: "$_id" },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $eq: [
+                    "$_id",
+                    { $toObjectId: "$$librarianId" }
+                  ]
+                }
+              }
+            }
+          ],
+          as: "librarian"
+        }
+      },
+
+      {
+        $unwind: "$librarian"
+      },
+
+      // Final response
+      {
+        $project: {
+          _id: 0,
+          id: "$librarian._id",
+          name: "$librarian.name",
+          avatar: "$librarian.image",
+          role: "$librarian.role",
+          deliveries: 1
+        }
+      }
+
+    ]).toArray();
+
+    res.send(result);
+
+  } catch (error) {
+    res.status(500).send({
+      success: false,
+      error: error.message
+    });
   }
 });
 
