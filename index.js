@@ -241,7 +241,7 @@ app.get("/api/users",verifyToken,adminVerify, async (req, res) => {
   res.send(result);
 });
 
-app.get("/api/users/librarian", async (req, res) => {
+app.get("/api/users/librarian",verifyToken,adminVerify, async (req, res) => {
   const query = {};
   const role = req.query.role;
   if (role) {
