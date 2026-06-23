@@ -1098,32 +1098,16 @@ app.get('/api/reviews/user/:userId', verifyToken, async (req, res) => {
   }
 });
 // নির্দিষ্ট বইয়ের সব রিভিউ GET
-app.get('/api/reviews/:bookId', async (req, res) => {
+app.get("/api/reviews/book/:bookId", async (req, res) => {
   try {
     const { bookId } = req.params;
-
-    if (!bookId) {
-      return res.status(400).json({ success: false, message: "Book ID is required" });
-    }
-
-    // 🎯 মঙ্গোডিবির সাথে আইডি ম্যাচ করানোর সেফ কন্ডিশন
-    const query = {
-      $or: [
-        { bookId: bookId.toString() }, // ১. যদি ডাটাবেজে ভুলবশত স্ট্রিং হিসেবে সেভ হয়ে থাকে
-        { bookId: ObjectId.isValid(bookId) ? new ObjectId(bookId) : bookId } // ২. আসল ObjectId ফরম্যাট চেক (মোস্টলি এটাই কাজ করবে)
-      ]
-    };
-
-    const reviews = await reviewsCollection
-      .find(query)
-      .sort({ createdAt: -1 })
-      .toArray();
-
+    const reviews = await reviewsCollection.find({ bookId: bookId.toString() }).toArray();
     res.json({ success: true, data: reviews });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
-});
+})
+
 
 
 app.get("/api/top-librarians", async (req, res) => {
