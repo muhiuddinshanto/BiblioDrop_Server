@@ -54,9 +54,9 @@ app.post('/api/webhook', express.raw({ type: 'application/json' }), async (req, 
         image: session.metadata.image,
         userId: session.metadata.userid,
         PaymentStatus: "completed",
-        status: "Pending Approval", // স্ট্যাটাস চলে এলো
+        status: "pending", 
         authorId: session.metadata.authorid,
-        stripeSessionId: session.id, // ইউনিক আইডি ট্র্যাকিং
+        stripeSessionId: session.id, 
         date: new Date(),
       };
 
@@ -962,7 +962,7 @@ app.get('/api/admin/stats',verifyToken,adminVerify, async (req, res) => {
 
 // ==================== REVIEW API ====================
 // Review POST — শুধু ক্রেতারাই পারবে
-app.post('/api/reviews', verifyToken, async (req, res) => {
+app.post('/api/reviews', async (req, res) => {
   try {
     const { bookId, rating, comment } = req.body;
     const userId = req.user._id.toString();
