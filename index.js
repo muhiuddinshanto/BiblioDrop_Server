@@ -18,6 +18,7 @@ app.use(cors());
 
 // ==================== STRIPE WEBHOOK ROUTE ====================
 // ⚠️ CRITICAL: এটি অবশ্যই express.json() মিডলওয়্যারের উপরে থাকবে।
+// ==================== STRIPE WEBHOOK ROUTE ====================
 app.post('/api/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
   const sig = req.headers['stripe-signature'];
   let event;
@@ -31,12 +32,19 @@ app.post('/api/webhook', express.raw({ type: 'application/json' }), async (req, 
 
   if (event.type === 'checkout.session.completed') {
     const session = event.data.object;
-    console.log("💰 PAYMENT SUCCESS, processing order...");
+    console.log("💰 PAYMENT SUCCESS, processing order via Webhook...");
 
     try {
       if (!session.metadata) throw new Error("Missing metadata");
 
-      // ✅ আপনার চাওয়া অবিকল মঙ্গোডিবি ডকুমেন্ট ফরম্যাট
+      // 🛑 সেফটি চেক: স্ট্রাইপ রিট্রাই করলেও যেন ডুপ্লিকেট না হয়
+      const existingOrder = await orderCollection.findOne({ stripeSessionId: session.id });
+      if (existingOrder) {
+        console.log("⚠️ Order already saved by webhook. Skipping.");
+        return res.json({ received: true });
+      }
+
+      // 🎯 পারফেক্ট ডকুমেন্ট ফরম্যাট
       const orderData = {
         BookId: session.metadata.bookid,
         title: session.metadata.title,
@@ -46,15 +54,17 @@ app.post('/api/webhook', express.raw({ type: 'application/json' }), async (req, 
         image: session.metadata.image,
         userId: session.metadata.userid,
         PaymentStatus: "completed",
+        status: "Pending Approval", // স্ট্যাটাস চলে এলো
         authorId: session.metadata.authorid,
+        stripeSessionId: session.id, // ইউনিক আইডি ট্র্যাকিং
         date: new Date(),
       };
 
       const result = await orderCollection.insertOne(orderData);
-      console.log("🎉 Order saved to MongoDB successfully! ID:", result.insertedId);
+      console.log("🎉 Order saved to MongoDB via Webhook! ID:", result.insertedId);
 
     } catch (error) {
-      console.error("❌ Database Insert Error:", error);
+      console.error("❌ Webhook Database Error:", error);
       return res.status(500).send("Internal Server Error");
     }
   }
@@ -234,7 +244,7 @@ app.get('/api/checkout-session/:sessionId', verifyToken, async (req, res) => {
 });
 
 
-///////////////////////////////////////
+///////////////////////////////////////User API/////////////////////////////////
 
 app.get("/api/users",verifyToken,adminVerify, async (req, res) => {
   const result = await usersCollection.find().toArray();
@@ -544,9 +554,28 @@ app.get('/api/orders',verifyToken, async (req, res) => {
 
 app.post('/api/orders', verifyToken, async (req, res) => {
   const order = req.body;
-  const newOrder = { ...order, date: new Date() };
-  const result = await orderCollection.insertOne(newOrder);
-  res.send(result);
+
+  try {
+    // 🛑 যদি ফ্রন্টএন্ড থেকে stripeSessionId আসে, তবে আগে চেক করুন অলরেডি ওয়েবহুক সেটা সেভ করেছে কিনা
+    if (order.stripeSessionId) {
+      const existingOrder = await orderCollection.findOne({ stripeSessionId: order.stripeSessionId });
+      if (existingOrder) {
+        return res.status(200).send({ success: true, message: "Order already processed by webhook.", result: existingOrder });
+      }
+    }
+
+    // যদি ফ্রন্টএন্ড থেকে সেভ করতেই হয়, তবে ডিফেন্স হিসেবে স্ট্যাটাস ডিফল্ট দিয়ে দিন
+    const newOrder = { 
+      ...order, 
+      status: order.status || "Pending Approval", // 🎯 এখানেও ব্যাকআপ স্ট্যাটাস দিয়ে দেওয়া হলো
+      date: new Date() 
+    };
+    
+    const result = await orderCollection.insertOne(newOrder);
+    res.send(result);
+  } catch (error) {
+    res.status(500).send({ success: false, error: error.message });
+  }
 });
 
 app.get('/api/orders/user/:authorId',verifyToken, async (req, res) => {
