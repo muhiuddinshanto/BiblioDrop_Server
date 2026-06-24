@@ -376,11 +376,7 @@ app.get('/api/books', async (req, res) => {
     const matchQuery = {};
 
     // ✅ status query আসলে সেটা use করো, না আসলে Published দেখাও
-    if (req.query.status) {
-      matchQuery.status = req.query.status;
-    } else if (!req.query.search) {
-      matchQuery.status = "Published";
-    }
+    
 
     // 🔍 সার্চ ফিল্টার
     if (req.query.search) {
